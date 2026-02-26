@@ -49,8 +49,11 @@ const C = {
 };
 const c = (color, s) => `${color}${s}${C.reset}`;
 
-const { suggestNonce, loadModel } = require('./nonce-analyzer');
-const nonceModel = loadModel(); // wczytaj nonce-model.json
+const { StrategyEngine, createStrategyState, suggestNonceStrategic } = require('./nonce-strategies');
+const { loadModel } = require('./nonce-analyzer');
+
+const model = loadModel();
+const engine = createStrategyState(model.hotRanges);
 
 // ─── Parse args ──────────────────────────────────────────────────────────────
 function parseArgs() {
@@ -342,7 +345,8 @@ async function mineLoop(node, address, opts) {
         console.log(c(C.gray, '  ─'.repeat(30)));
 
         // ── 4. Główna pętla nonce ─────────────────────────────────────────────
-        let nonce = suggestNonce(nonceModel);
+        engine.setSeed(template.seed_hash);
+        let nonce = suggestNonceStrategic(engine, true);
         let count = 0;
         let roundStart = Date.now();
         let lastReport = Date.now();
@@ -390,6 +394,8 @@ async function mineLoop(node, address, opts) {
                             totalBlocks++;
                             console.log(c(C.green + C.bold, `\n  ✅ BLOK ZAAKCEPTOWANY! Nagroda: 0.6 XMR`));
                             console.log(`  ${c(C.cyan, 'Łącznie znalezionych bloków:')} ${totalBlocks}`);
+                            engine.reward(foundNonce);
+                            engine.printStatus();
                         } else {
                             console.log(c(C.red, `\n  ❌ Blok odrzucony: ${JSON.stringify(result)}`));
                         }
@@ -426,7 +432,8 @@ async function mineLoop(node, address, opts) {
                 lastReport = now;
             }
 
-            nonce = suggestNonce(nonceModel);
+            engine.setSeed(template.seed_hash);
+            nonce = suggestNonceStrategic(engine, true);
         }
 
         if (!found && nonce > MAX_NONCE) {
