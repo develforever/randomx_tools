@@ -35,7 +35,7 @@ const USE_REAL_RANDOMX = true;  // ← zmień na true po: npm install randomx.js
 const { StrategyEngine, createStrategyState, suggestNonceStrategic } = require('./nonce-strategies');
 const { loadModel } = require('./nonce-analyzer');
 const { rpcCall, findWorkingNode, PUBLIC_NODES } = require('./nodes-api');
-const { c, C } = require('./cli-util');
+const { c, C, drawBar } = require('./cli-util');
 
 const model = loadModel();
 const engine = createStrategyState(model.hotRanges);
@@ -366,10 +366,10 @@ async function mineLoop(node, address, opts) {
                 const bar = drawBar(nonce, MAX_NONCE, 20);
                 process.stdout.write(
                     `\r  ${bar} ` +
-                    `${c(C.cyan, '#' + fmtNum(height))} ` +
-                    `nonce:${c(C.white, fmtNum(nonce))} ` +
-                    `${c(C.orange, fmtHashrate(rate))} ` +
-                    `[${c(C.gray, fmtTime(total))}]    `
+                    `block: ${c(C.cyan, '#' + fmtNum(height))} ` +
+                    `nonce: ${c(C.white, fmtNum(nonce))} ` +
+                    `rate: ${c(C.orange, fmtHashrate(rate))} ` +
+                    `time: ${c(C.gray, fmtTime(total))}    `
                 );
 
                 lastReport = now;
@@ -391,12 +391,7 @@ async function mineLoop(node, address, opts) {
     }
 }
 
-// ─── Pasek postępu ────────────────────────────────────────────────────────────
-function drawBar(current, max, width) {
-    const pct = Math.min(current / max, 1);
-    const fill = Math.floor(pct * width);
-    return `[${c(C.orange, '█'.repeat(fill))}${c(C.gray, '░'.repeat(width - fill))}]`;
-}
+
 
 // ─── Walidacja adresu XMR ─────────────────────────────────────────────────────
 function validateXMRAddress(addr) {

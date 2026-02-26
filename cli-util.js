@@ -8,8 +8,22 @@ const C = {
 };
 const c = (color, s) => `${color}${s}${C.reset}`;
 
+// ─── Pasek postępu ────────────────────────────────────────────────────────────
+function drawBar(current, max, width) {
+    const pct = Math.min(current / max, 1);
+    const fill = Math.floor(pct * width);
+    return `[${c(C.orange, '█'.repeat(fill))}${c(C.gray, '░'.repeat(width - fill))}]`;
+}
+
+function out(output) {
+    process.stdout.write(
+        `\r  ${output} \x1b[K`
+    );
+}
 
 module.exports = {
     C,
     c,
+    drawBar,
+    out,
 };
