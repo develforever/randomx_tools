@@ -31,26 +31,11 @@ const { Worker, isMainThread, parentPort, workerData } = require('worker_threads
 // ─── KONFIGURACJA ────────────────────────────────────────────────────────────
 const USE_REAL_RANDOMX = true;  // ← zmień na true po: npm install randomx.js
 
-// Publiczne węzły Monero (port 18089 = restricted RPC, obsługuje get_block_template)
-const PUBLIC_NODES = [
-    'http://node.moneroworld.com:18089',
-    'http://nodes.hashvault.pro:18081',
-    'http://node.community.rino.io:18081',
-    'http://opennode.xmr-tw.org:18089',
-    'http://p2pmd.xmr-tw.org:18089',
-];
-
-// ─── Kolory ANSI ─────────────────────────────────────────────────────────────
-const C = {
-    reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
-    orange: '\x1b[38;5;208m', green: '\x1b[32m', red: '\x1b[31m',
-    cyan: '\x1b[36m', yellow: '\x1b[33m', gray: '\x1b[90m',
-    white: '\x1b[97m', magenta: '\x1b[35m',
-};
-const c = (color, s) => `${color}${s}${C.reset}`;
 
 const { StrategyEngine, createStrategyState, suggestNonceStrategic } = require('./nonce-strategies');
 const { loadModel } = require('./nonce-analyzer');
+const { rpcCall, findWorkingNode, PUBLIC_NODES } = require('./nodes-api');
+const { c, C } = require('./cli-util');
 
 const model = loadModel();
 const engine = createStrategyState(model.hotRanges);
@@ -113,70 +98,6 @@ ${c(C.yellow, 'PRAWDZIWY RANDOMX:')}
 
 ${c(C.gray, '─'.repeat(58))}
 `);
-}
-
-// ─── HTTP/HTTPS JSON-RPC ─────────────────────────────────────────────────────
-function rpcCall(nodeUrl, method, params = {}) {
-    return new Promise((resolve, reject) => {
-        const body = JSON.stringify({
-            jsonrpc: '2.0',
-            id: '0',
-            method,
-            params,
-        });
-
-        const url = new URL(nodeUrl + '/json_rpc');
-        const isHttps = url.protocol === 'https:';
-        const lib = isHttps ? https : http;
-
-        const reqOpts = {
-            hostname: url.hostname,
-            port: url.port || (isHttps ? 443 : 80),
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(body),
-            },
-            timeout: 10000,
-        };
-
-        const req = lib.request(reqOpts, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    const parsed = JSON.parse(data);
-                    if (parsed.error) reject(new Error(`RPC error: ${parsed.error.message}`));
-                    else resolve(parsed.result);
-                } catch (e) {
-                    reject(new Error(`JSON parse error: ${e.message}`));
-                }
-            });
-        });
-
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-        req.write(body);
-        req.end();
-    });
-}
-
-// ─── Znajdź działający węzeł ─────────────────────────────────────────────────
-async function findWorkingNode(nodes) {
-    for (const node of nodes) {
-        try {
-            process.stdout.write(`  Próbuję ${c(C.cyan, node)} ... `);
-            const info = await rpcCall(node, 'get_info');
-            if (info && info.status === 'OK') {
-                console.log(c(C.green, '✅ OK') + ` (blok #${info.height})`);
-                return node;
-            }
-        } catch (e) {
-            console.log(c(C.red, '❌ ' + e.message.slice(0, 40)));
-        }
-    }
-    return null;
 }
 
 // ─── Pobierz block template ──────────────────────────────────────────────────
@@ -290,12 +211,25 @@ function makeTestTemplate() {
     };
 }
 
+function updateExtraNonce(block_template_buffer) {
+    // Zazwyczaj w blobie Monero, wolne miejsce (reserved space) 
+    // znajduje się za adresem portfela.
+    // Dla uproszczenia w Solo Miningu możemy zmodyfikować bajty 
+    // w bezpiecznym zakresie "extra" (zależy od szablonu z noda).
+
+    // Przykład: inkrementacja bajtu na pozycji 60 (część danych transakcji)
+    let currentExtra = block_template_buffer.readUInt8(60);
+    block_template_buffer.writeUInt8((currentExtra + 1) % 256, 60);
+
+    console.log("Zaktualizowano Extra Nonce. Przestrzeń przeszukiwania odświeżona.");
+}
+
 // ─── GŁÓWNA PĘTLA MININGU ─────────────────────────────────────────────────────
 async function mineLoop(node, address, opts) {
     const MAX_NONCE = 0xFFFFFFFF;
-    const REPORT_EVERY = 25000;     // raportuj co 25k hashy
-    const REFRESH_EVERY = 30000;    // nowy template co 30 sekund (nowy blok!)
-
+    const REPORT_EVERY = 50;     // raportuj co 25k hashy
+    const REFRESH_EVERY = 60000;    // nowy template co 30 sekund (nowy blok!)
+    const CHECK_EVERY = 5000;
     let totalBlocks = 0;
     let sessionStart = Date.now();
 
@@ -360,6 +294,15 @@ async function mineLoop(node, address, opts) {
                 break; // wróć do pętli zewnętrznej
             }
 
+            if (!opts.testMode && Date.now() - templateAge > CHECK_EVERY) {
+                let tmptemplate = await getBlockTemplate(node, address);
+                if (tmptemplate.height > template.height) {
+                    template = tmptemplate;
+                    templateAge = Date.now();
+                    console.log(c(C.yellow, '\n  ⟳ Sprawdzam nowy template... OK'));
+                }
+            }
+
             // Wstaw nonce do bloba i hash
             const blobBuf = insertNonce(hashBlob, nonce);
             const hash = calcHash(blobBuf);
@@ -394,7 +337,7 @@ async function mineLoop(node, address, opts) {
                             totalBlocks++;
                             console.log(c(C.green + C.bold, `\n  ✅ BLOK ZAAKCEPTOWANY! Nagroda: 0.6 XMR`));
                             console.log(`  ${c(C.cyan, 'Łącznie znalezionych bloków:')} ${totalBlocks}`);
-                            engine.reward(foundNonce);
+                            engine.reward(nonce);
                             engine.printStatus();
                         } else {
                             console.log(c(C.red, `\n  ❌ Blok odrzucony: ${JSON.stringify(result)}`));
@@ -441,6 +384,9 @@ async function mineLoop(node, address, opts) {
             // To może się zdarzyć przy bardzo wysokiej trudności
             // → odświeżamy template (z nowym extra_nonce w coinbase automatycznie)
             console.log(c(C.yellow, '\n  ⚠️  Wyczerpano nonce 32-bit → pobieranie nowego template'));
+            updateExtraNonce(templateBlob);
+            engine.setSeed(template.seed_hash);
+            nonce = suggestNonceStrategic(engine, true);
         }
     }
 }
@@ -534,6 +480,6 @@ process.on('SIGINT', () => {
 });
 
 main().catch(e => {
-    console.error(c(C.red, `\n❌ Błąd krytyczny: ${e.message}`));
+    console.error(c(C.red, `\n❌ Błąd krytyczny: ${e.message}`), e.stack);
     process.exit(1);
 });

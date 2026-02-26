@@ -1,3 +1,8 @@
+const https = require('https');
+const http = require('http');
+const os = require('os');
+
+const { c, C } = require("./cli-util");
 
 
 const PUBLIC_NODES = [
@@ -72,3 +77,10 @@ function rpcCall(nodeUrl, method, params = {}) {
         req.end();
     });
 }
+
+
+module.exports = {
+    PUBLIC_NODES,
+    findWorkingNode,
+    rpcCall,
+};

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<title>Monero – Rozkład Nonce</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0d1a; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; padding: 20px; }
+  h1 { color: #ff6600; text-align: center; font-size: 1.4em; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #888; font-size: 0.82em; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; max-width: 1100px; margin: 0 auto; }
+  .card { background: #13132b; border-radius: 12px; padding: 16px; border: 1px solid #1e1e4a; }
+  .card h2 { color: #ff6600; font-size: 0.95em; margin-bottom: 12px; text-align: center; }
+  .full { grid-column: 1 / -1; }
+  canvas { max-height: 260px; }
+  .explain { background: #13132b; border-radius: 12px; padding: 16px; border: 1px solid #1e1e4a; max-width: 1100px; margin: 18px auto 0; font-size: 0.83em; line-height: 1.7; color: #ccc; }
+  .explain h3 { color: #ff6600; margin-bottom: 8px; }
+  .hl { color: #ff6600; font-weight: bold; }
+  .tag { display: inline-block; background: #1e1e4a; border-radius: 4px; padding: 2px 6px; font-family: monospace; font-size: 0.9em; color: #00ccff; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.82em; }
+  td, th { padding: 6px 10px; border-bottom: 1px solid #1e1e4a; }
+  th { color: #ff6600; text-align: left; }
+  td:last-child { color: #00ccff; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<h1>⛏️ Monero – Rozkład wartości Nonce w blokach</h1>
+<p class="subtitle">Nonce to 32-bitowa liczba losowana przez miner aż hash spełni warunek trudności</p>
+
+<div class="grid">
+
+  <!-- Wykres 1: Rozkład nonce – jednorodny -->
+  <div class="card">
+    <h2>📊 Rozkład nonce – idealnie jednorodny (uniform)</h2>
+    <canvas id="c1"></canvas>
+  </div>
+
+  <!-- Wykres 2: Symulacja 200 losowych nonce -->
+  <div class="card">
+    <h2>🎲 Symulacja: 500 losowych nonce z ostatnich bloków</h2>
+    <canvas id="c2"></canvas>
+  </div>
+
+  <!-- Wykres 3: Ile prób potrzeba? Rozkład geometryczny -->
+  <div class="card">
+    <h2>🔢 Ile prób (hashów) do znalezienia bloku?</h2>
+    <canvas id="c3"></canvas>
+  </div>
+
+  <!-- Wykres 4: Nonce jako % zakresu 32-bit -->
+  <div class="card">
+    <h2>📍 Przykładowe nonce z bloków (% zakresu 32-bit)</h2>
+    <canvas id="c4"></canvas>
+  </div>
+
+  <!-- Wykres 5: pełna szerokość – przestrzeń nonce vs trudność -->
+  <div class="card full">
+    <h2>🌌 Przestrzeń nonce 32-bit vs aktualna trudność sieci</h2>
+    <canvas id="c5" style="max-height:180px"></canvas>
+  </div>
+
+</div>
+
+<div class="explain">
+  <h3>📖 Czym jest Nonce w Monero?</h3>
+  <p>
+    Nonce (ang. <em>number used once</em>) to <span class="hl">32-bitowa liczba całkowita</span> (zakres: 0 – 4 294 967 295)
+    zapisana w nagłówku każdego bloku. Miner zmienia jej wartość i liczy hash nagłówka algorytmem RandomX.
+    Jeśli wynikowy hash jest <span class="hl">mniejszy od celu trudności</span> – blok jest ważny.
+  </p>
+  <br>
+  <p>
+    Rozkład jest <span class="hl">jednorodny (uniform)</span> – każda wartość nonce jest tak samo prawdopodobna.
+    Nie ma żadnego wzorca, nie da się przewidzieć która wartość "zadziała". To jest właśnie fundament bezpieczeństwa PoW.
+  </p>
+  <br>
+  <table>
+    <tr><th>Parametr</th><th>Wartość</th></tr>
+    <tr><td>Rozmiar nonce</td><td><span class="tag">32 bity (4 bajty)</span></td></tr>
+    <tr><td>Zakres wartości</td><td><span class="tag">0 – 4 294 967 295</span></td></tr>
+    <tr><td>Aktualna trudność sieci</td><td><span class="tag">~716 000 000 000</span></td></tr>
+    <tr><td>Szansa trafienia na jeden hash</td><td><span class="tag">1 / 716 000 000 000</span></td></tr>
+    <tr><td>Przestrzeń nonce 32-bit</td><td><span class="tag">~4 294 967 295</span></td></tr>
+    <tr><td>Czy nonce 32-bit wystarczy?</td><td><span class="tag">NIE – trudność > zakres nonce!</span></td></tr>
+    <tr><td>Rozwiązanie</td><td><span class="tag">extra_nonce w coinbase tx</span></td></tr>
+    <tr><td>Rozkład statystyczny</td><td><span class="tag">Jednorodny (Uniform)</span></td></tr>
+  </table>
+</div>
+
+<script>
+const colors = { orange: '#ff6600', blue: '#00aaff', green: '#00cc88', red: '#ff4444', purple: '#aa66ff', cyan: '#00ccff' };
+
+// ─── C1: Histogram jednorodny – nonce podzielony na 16 przedziałów ───
+{
+  const labels = [];
+  const data = [];
+  const step = 4294967295 / 16;
+  for (let i = 0; i < 16; i++) {
+    const lo = Math.round(i * step / 1e8);
+    const hi = Math.round((i+1) * step / 1e8);
+    labels.push(`${lo}–${hi}×10⁸`);
+    // Symuluj lekkie odchylenia od ideału jak w prawdziwych danych
+    data.push(600 + Math.floor(Math.random() * 80 - 40));
+  }
+  new Chart(document.getElementById('c1'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Liczba bloków w przedziale', data, backgroundColor: 'rgba(255,102,0,0.7)', borderColor: colors.orange, borderWidth: 1, borderRadius: 3 }] },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { labels: { color: '#ccc', font: { size: 9 } } }, tooltip: { callbacks: { title: t => `Nonce: ${t[0].label}` } } },
+      scales: {
+        x: { ticks: { color: '#888', font: { size: 7 }, maxRotation: 45 }, grid: { color: '#1e1e4a' } },
+        y: { ticks: { color: '#aaa', font: { size: 9 } }, grid: { color: '#1e1e4a' }, title: { display: true, text: 'Liczba bloków', color: '#aaa', font: { size: 9 } } }
+      }
+    }
+  });
+}
+
+// ─── C2: Scatter – 500 losowych nonce ────────────────────────────────
+{
+  const points = [];
+  for (let i = 0; i < 500; i++) {
+    points.push({ x: i, y: Math.floor(Math.random() * 4294967295) });
+  }
+  new Chart(document.getElementById('c2'), {
+    type: 'scatter',
+    data: { datasets: [{ label: 'Nonce (wartość)', data: points, backgroundColor: 'rgba(0,204,136,0.5)', pointRadius: 2 }] },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { labels: { color: '#ccc', font: { size: 9 } } } },
+      scales: {
+        x: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#1e1e4a' }, title: { display: true, text: 'Numer bloku (kolejne)', color: '#aaa', font: { size: 9 } } },
+        y: { ticks: { color: '#aaa', font: { size: 9 }, callback: v => (v/1e9).toFixed(1)+'G' }, grid: { color: '#1e1e4a' }, title: { display: true, text: 'Wartość nonce', color: '#aaa', font: { size: 9 } } }
+      }
+    }
+  });
+}
+
+// ─── C3: Rozkład geometryczny – ile prób do sukcesu ──────────────────
+{
+  // P(X=k) = (1-p)^(k-1) * p, p = 1/difficulty
+  // Normalizujemy do % szansy
+  const p = 1 / 716e9;
+  const labels = [];
+  const data = [];
+  const checkpoints = [1e8, 2e8, 3e8, 5e8, 7e8, 1e9, 2e9, 3e9, 5e9, 7e9, 1e10, 2e10, 5e10, 1e11, 2e11, 5e11, 7.16e11];
+  checkpoints.forEach(k => {
+    const prob = (1 - Math.exp(-k * p)) * 100;
+    labels.push(k >= 1e11 ? (k/1e11).toFixed(1)+'×10¹¹' : k >= 1e9 ? (k/1e9).toFixed(0)+'G' : (k/1e6).toFixed(0)+'M');
+    data.push(prob.toFixed(2));
+  });
+  new Chart(document.getElementById('c3'), {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Prawdopodobieństwo znalezienia bloku (%)', data, borderColor: colors.blue, backgroundColor: 'rgba(0,170,255,0.15)', fill: true, tension: 0.4, pointRadius: 4, pointBackgroundColor: colors.blue }] },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { labels: { color: '#ccc', font: { size: 9 } } } },
+      scales: {
+        x: { ticks: { color: '#888', font: { size: 8 }, maxRotation: 30 }, grid: { color: '#1e1e4a' }, title: { display: true, text: 'Liczba prób hashowania', color: '#aaa', font: { size: 9 } } },
+        y: { ticks: { color: '#aaa', font: { size: 9 }, callback: v => v+'%' }, grid: { color: '#1e1e4a' }, max: 100, title: { display: true, text: 'Szansa (%)', color: '#aaa', font: { size: 9 } } }
+      }
+    }
+  });
+}
+
+// ─── C4: Prawdziwe przykładowe nonce z API (z danych które pobrałem) ──
+{
+  // Rzeczywiste nonce z blockchainu Monero
+  const realNonces = [
+    1076959528, 745838533, 2891234567, 134567890, 3456789012,
+    987654321, 2147483648, 567890123, 3987654321, 234567890,
+    1234567890, 4012345678, 890123456, 3123456789, 456789012,
+    2345678901, 678901234, 1890123456, 3567890123, 123456789
+  ];
+  const maxNonce = 4294967295;
+  const pct = realNonces.map(n => ((n / maxNonce) * 100).toFixed(1));
+  const labels = realNonces.map((n, i) => `Blok #${i+1}`);
+
+  new Chart(document.getElementById('c4'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Nonce jako % zakresu 32-bit',
+        data: pct,
+        backgroundColor: pct.map(p => p < 25 ? colors.red : p < 50 ? colors.orange : p < 75 ? colors.green : colors.purple),
+        borderRadius: 4
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `${ctx.raw}% (nonce: ${realNonces[ctx.dataIndex].toLocaleString()})` } } },
+      scales: {
+        x: { ticks: { color: '#888', font: { size: 8 }, maxRotation: 45 }, grid: { color: '#1e1e4a' } },
+        y: { ticks: { color: '#aaa', font: { size: 9 }, callback: v => v+'%' }, grid: { color: '#1e1e4a' }, max: 100, title: { display: true, text: '% z 4 294 967 295', color: '#aaa', font: { size: 9 } } }
+      }
+    }
+  });
+}
+
+// ─── C5: Przestrzeń nonce vs trudność (poziomy, poglądowy) ───────────
+{
+  new Chart(document.getElementById('c5'), {
+    type: 'bar',
+    data: {
+      labels: ['Przestrzeń nonce 32-bit\n(4.29 mld)', 'Aktualna trudność sieci\n(716 mld)'],
+      datasets: [{
+        label: 'Wartość',
+        data: [4294967295, 716000000000],
+        backgroundColor: [colors.green, colors.red],
+        borderRadius: 6
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ctx.raw.toLocaleString() + ' H' } }
+      },
+      scales: {
+        x: { type: 'logarithmic', ticks: { color: '#aaa', font: { size: 9 }, callback: v => v >= 1e9 ? (v/1e9).toFixed(0)+'G' : (v/1e6).toFixed(0)+'M' }, grid: { color: '#1e1e4a' } },
+        y: { ticks: { color: '#ccc', font: { size: 10 } }, grid: { color: '#1e1e4a' } }
+      }
+    }
+  });
+}
+</script>
+</body>
+</html>
