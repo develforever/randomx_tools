@@ -342,7 +342,7 @@ async function mineLoop(node, address, opts) {
         console.log(c(C.gray, '  ─'.repeat(30)));
 
         // ── 4. Główna pętla nonce ─────────────────────────────────────────────
-        let nonce = 0;
+        let nonce = suggestNonce(nonceModel);
         let count = 0;
         let roundStart = Date.now();
         let lastReport = Date.now();
@@ -426,7 +426,7 @@ async function mineLoop(node, address, opts) {
                 lastReport = now;
             }
 
-            nonce++;
+            nonce = suggestNonce(nonceModel);
         }
 
         if (!found && nonce > MAX_NONCE) {

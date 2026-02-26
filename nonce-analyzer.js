@@ -264,6 +264,8 @@ function buildHotRanges(topBins, binSize, clusters) {
     return ranges.sort((a, b) => b.score - a.score);
 }
 
+const generated = [];
+
 // ─── KLUCZOWA FUNKCJA: suggestNonce ──────────────────────────────────────────
 /**
  * Zwraca sugerowaną wartość startową nonce na podstawie modelu historycznego.
