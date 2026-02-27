@@ -6,7 +6,6 @@ const { c, C } = require("./cli-util");
 
 
 const PUBLIC_NODES = [
-    'http://node.moneroworld.com:18089',
     'http://nodes.hashvault.pro:18081',
     'http://node.community.rino.io:18081',
     'http://opennode.xmr-tw.org:18089',

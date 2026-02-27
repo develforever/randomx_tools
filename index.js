@@ -37,8 +37,8 @@ const { loadModel } = require('./nonce-analyzer');
 const { rpcCall, findWorkingNode, PUBLIC_NODES } = require('./nodes-api');
 const { c, C, drawBar } = require('./cli-util');
 
-const model = loadModel();
-const engine = createStrategyState(model.hotRanges);
+const model = loadModel('nonce-model.json');
+const engine = createStrategyState(model.hotRanges, model);
 
 // ─── Parse args ──────────────────────────────────────────────────────────────
 function parseArgs() {
@@ -374,9 +374,6 @@ async function mineLoop(node, address, opts) {
 
                 lastReport = now;
             }
-
-            engine.setSeed(template.seed_hash);
-            nonce = suggestNonceStrategic(engine, true);
         }
 
         if (!found && nonce > MAX_NONCE) {
@@ -388,6 +385,9 @@ async function mineLoop(node, address, opts) {
             engine.setSeed(template.seed_hash);
             nonce = suggestNonceStrategic(engine, true);
         }
+
+        const saved = engine.exportState();
+        fs.writeFileSync('nonce-model.json', JSON.stringify(saved));
     }
 }
 

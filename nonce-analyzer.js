@@ -11,6 +11,7 @@
  *  UŻYCIE:
  *    node nonce-analyzer.js              ← analiza + zapis modelu
  *    node nonce-analyzer.js --blocks 200 ← mniej bloków
+ *    node nonce-analyzer.js --model nonce-model.json
  *    node nonce-analyzer.js --help
  *
  *  IMPORT W SOLO-MINER:
@@ -34,9 +35,11 @@ const C = {
 };
 const c = (col, s) => `${col}${s}${C.reset}`;
 
+const opts = parseArgs();
+
 // ─── Stałe ───────────────────────────────────────────────────────────────────
 const MAX_NONCE = 4294967295;    // 2^32 - 1
-const MODEL_FILE = path.join(__dirname, 'nonce-model.json');
+const MODEL_FILE = path.join(__dirname, opts.model);
 
 // API publiczne explorera – zwraca nonce w bloku
 // GET https://localmonero.co/blocks/api/get_block_header/{height}
@@ -457,10 +460,11 @@ function drawBar(current, max, width) {
 
 function parseArgs() {
     const args = process.argv.slice(2);
-    const opts = { blocks: 500, help: false };
+    const opts = { blocks: 500, help: false, model: 'nonce-model.json' };
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--blocks') opts.blocks = parseInt(args[++i]);
         if (args[i] === '--help' || args[i] === '-h') opts.help = true;
+        if (args[i] === '--model') opts.model = args[++i];
     }
     return opts;
 }
@@ -485,7 +489,6 @@ IMPORT W SOLO-MINER:
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 async function main() {
-    const opts = parseArgs();
 
     if (opts.help) { printHelp(); return; }
 
