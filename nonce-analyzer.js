@@ -202,7 +202,7 @@ function analyzeNonces(blocks) {
         isUniform,
         coverage: (max - min) / MAX_NONCE,
         // Przedziały zalecane do szukania nonce
-        hotRanges: buildHotRanges(topBins, binSize, clusters),
+        hotRanges: buildHotRanges(topBins, binSize, clusters, hist),
     };
 }
 
@@ -239,31 +239,31 @@ function findClusters(sortedNonces, windowSize, minCount) {
         .slice(0, 5); // top 5 klastrów
 }
 
-// ─── Zbuduj listę "gorących" przedziałów do szukania ─────────────────────────
-function buildHotRanges(topBins, binSize, clusters) {
+// ── POPRAWKA — wszystkie 16 binów z proporcjonalnymi wagami:
+function buildHotRanges(topBins, binSize, clusters, fullHistogram) {
     const ranges = [];
 
-    // Z histogramu – top 3 biny
-    topBins.forEach(({ bin, count }) => {
+    // Wszystkie biny histogramu jako przedziały z wagami = liczba bloków
+    fullHistogram.forEach((count, i) => {
+        if (count === 0) return; // pomiń puste
         ranges.push({
             source: 'histogram',
-            lo: Math.floor(bin * binSize),
-            hi: Math.floor((bin + 1) * binSize),
-            score: count,
+            lo: Math.floor(i * binSize),
+            hi: Math.floor((i + 1) * binSize),
+            score: count,  // ← bezpośrednio liczba bloków = prawdopodobieństwo
         });
     });
 
-    // Z klastrów
+    // Klastry jako dodatkowe węższe przedziały z wyższą wagą
     clusters.slice(0, 2).forEach(cl => {
         ranges.push({
             source: 'cluster',
             lo: cl.lo,
             hi: Math.min(cl.hi, MAX_NONCE),
-            score: cl.count * 2, // klastry ważniejsze
+            score: cl.count * 2,
         });
     });
 
-    // Usuń duplikaty i posortuj po score
     return ranges.sort((a, b) => b.score - a.score);
 }
 

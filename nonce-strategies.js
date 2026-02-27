@@ -46,7 +46,7 @@ const ALGORITHMS = {
     center: {
         label: 'Center',
         description: 'Środek przedziału (lo + hi) / 2',
-        baseWeight: 15,
+        baseWeight: 8,
         generate({ lo, hi }) {
             return Math.floor((lo + hi) / 2);
         },
@@ -92,7 +92,7 @@ const ALGORITHMS = {
     sequential: {
         label: 'Sequential lo→hi',
         description: 'Iteracja od lo do hi, krok=1',
-        baseWeight: 10,
+        baseWeight: 5,
         generate({ lo, hi, state }) {
             const pos = state.seqPos || 0;
             const span = hi - lo;
@@ -150,7 +150,7 @@ const ALGORITHMS = {
     mirror: {
         label: 'Mirror',
         description: 'MAX_NONCE - nonce z center, eksploracja przeciwnej strony',
-        baseWeight: 12,
+        baseWeight: 32,
         generate({ lo, hi, state }) {
             const phase = (state.mirrorPhase || 0) % 3;
             state.mirrorPhase = phase + 1;
@@ -162,11 +162,14 @@ const ALGORITHMS = {
         generateSeeded({ lo, hi, seed, state }) {
             const phase = (state.mirrorPhase || 0) % 3;
             state.mirrorPhase = phase + 1;
-            const seedOff = seededInt(seed, 'mirror') % Math.floor((hi - lo) / 2);
+            // seedOff mały – tylko różnicuje wywołania, nie przesuwa daleko od MAX_NONCE
+            const span = hi - lo;
+            const seedOff = seededInt(seed, 'mirror') % span;
             const center = Math.floor((lo + hi) / 2);
-            if (phase === 0) return Math.abs(MAX_NONCE - center + seedOff) % (MAX_NONCE + 1);
-            if (phase === 1) return Math.abs(MAX_NONCE - lo + seedOff) % (MAX_NONCE + 1);
-            return Math.abs(MAX_NONCE - hi + seedOff) % (MAX_NONCE + 1);
+            // Wszystkie trzy fazy celują w GÓRNĄ część przestrzeni (>75%)
+            if (phase === 0) return MAX_NONCE - lo - seedOff;           // blisko MAX_NONCE
+            if (phase === 1) return MAX_NONCE - center - seedOff;       // lustro środka
+            return MAX_NONCE - hi - (seedOff % Math.max(1, Math.floor(span / 4))); // lustro hi
         },
     },
 

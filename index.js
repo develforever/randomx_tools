@@ -26,19 +26,35 @@ const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
 const os = require('os');
+const fs = require('fs');                                          // #2 FIX: brakujący import
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 
 // ─── KONFIGURACJA ────────────────────────────────────────────────────────────
 const USE_REAL_RANDOMX = true;  // ← zmień na true po: npm install randomx.js
 
+const MODEL_FILE = 'nonce-model.json';
+const ENGINE_FILE = 'engine-state.json'; // #3 FIX: stan silnika osobno od modelu
 
 const { StrategyEngine, createStrategyState, suggestNonceStrategic } = require('./nonce-strategies');
 const { loadModel } = require('./nonce-analyzer');
 const { rpcCall, findWorkingNode, PUBLIC_NODES } = require('./nodes-api');
 const { c, C, drawBar } = require('./cli-util');
+const { applyExtraNonce, rebuildHashBlob } = require('./merkle-util'); // #4 FIX: lokalny merkle
 
-const model = loadModel('nonce-model.json');
-const engine = createStrategyState(model.hotRanges, model);
+const model = loadModel(MODEL_FILE);
+if (!model) {
+    console.error(`❌ Brak modelu ${MODEL_FILE}. Uruchom: node nonce-analyzer.js`);
+    process.exit(1);
+}
+// #1 FIX: tylko hotRanges — nie przekazuj całego modelu jako saved
+const engine = createStrategyState(model.hotRanges);
+if (fs.existsSync(ENGINE_FILE)) {
+    try {
+        engine.importState(JSON.parse(fs.readFileSync(ENGINE_FILE, 'utf8')));
+    } catch (_) {
+        console.log('  ⚠️  Błąd wczytywania engine-state.json, startujemy od nowa');
+    }
+}
 
 // ─── Parse args ──────────────────────────────────────────────────────────────
 function parseArgs() {
@@ -143,11 +159,22 @@ function calcHash(data) {
 // Struktura blockhashing_blob:
 //   bajty 0-38:  nagłówek (major_version, minor_version, timestamp, prev_hash...)
 //   bajty 39-42: NONCE (4 bajty little-endian) ← tutaj wpisujemy
-//   bajty 43+:   merkle root i reszta
-function insertNonce(blobHex, nonce) {
-    const buf = Buffer.from(blobHex, 'hex');
-    buf.writeUInt32LE(nonce, 39);
-    return buf;
+//   bajty 43+:   merkle root
+//
+// UWAGA: zwraca ten sam bufor roboczy za każdym razem (nie tworzy kopii).
+// Caller musi go użyć zanim następne wywołanie go nadpisze.
+let _workBuf = null;
+function insertNonce(blob, nonce) {
+    // Przy pierwszym wywołaniu lub zmianie bloba (nowy hashBlob po extra_nonce)
+    // inicjuj bufor roboczy
+    const src = Buffer.isBuffer(blob) ? blob : Buffer.from(blob, 'hex');
+    if (!_workBuf || _workBuf.length !== src.length) {
+        _workBuf = Buffer.from(src);
+    } else if (_workBuf !== src) {
+        src.copy(_workBuf);
+    }
+    _workBuf.writeUInt32LE(nonce >>> 0, 39);
+    return _workBuf;
 }
 
 // ─── Oblicz target z difficulty ──────────────────────────────────────────────
@@ -170,15 +197,6 @@ function meetsTarget(hashBuf, targetBuf) {
         if (hashBuf[i] > targetBuf[i]) return false;
     }
     return true;
-}
-
-// ─── Zamień blockhashing_blob na blocktemplate_blob z nowym nonce ─────────────
-// Po znalezieniu nonce musimy go wstawić do blocktemplate_blob (nie do blockhashing_blob)
-// i wysłać ten blob jako submit_block
-function prepareSubmitBlob(templateBlob, nonce) {
-    const buf = Buffer.from(templateBlob, 'hex');
-    buf.writeUInt32LE(nonce, 39);
-    return buf.toString('hex');
 }
 
 // ─── Formatowanie ────────────────────────────────────────────────────────────
@@ -211,25 +229,12 @@ function makeTestTemplate() {
     };
 }
 
-function updateExtraNonce(block_template_buffer) {
-    // Zazwyczaj w blobie Monero, wolne miejsce (reserved space) 
-    // znajduje się za adresem portfela.
-    // Dla uproszczenia w Solo Miningu możemy zmodyfikować bajty 
-    // w bezpiecznym zakresie "extra" (zależy od szablonu z noda).
-
-    // Przykład: inkrementacja bajtu na pozycji 60 (część danych transakcji)
-    let currentExtra = block_template_buffer.readUInt8(60);
-    block_template_buffer.writeUInt8((currentExtra + 1) % 256, 60);
-
-    console.log("Zaktualizowano Extra Nonce. Przestrzeń przeszukiwania odświeżona.");
-}
 
 // ─── GŁÓWNA PĘTLA MININGU ─────────────────────────────────────────────────────
 async function mineLoop(node, address, opts) {
     const MAX_NONCE = 0xFFFFFFFF;
-    const REPORT_EVERY = 50;     // raportuj co 25k hashy
-    const REFRESH_EVERY = 60000;    // nowy template co 30 sekund (nowy blok!)
-    const CHECK_EVERY = 5000;
+    const REPORT_EVERY = 10_000;  // raportuj co 10k hashy
+    const CHECK_EVERY = 5000;    // sprawdzaj nowy blok co 5s
     let totalBlocks = 0;
     let sessionStart = Date.now();
 
@@ -278,116 +283,148 @@ async function mineLoop(node, address, opts) {
         console.log(`  ${c(C.cyan, 'Hash fn:')}   ${hashEngine === 'randomx' ? c(C.green, 'RandomX ✅') : c(C.yellow, 'SHA-256 (placeholder)')}`);
         console.log(c(C.gray, '  ─'.repeat(30)));
 
-        // ── 4. Główna pętla nonce ─────────────────────────────────────────────
-        engine.setSeed(template.seed_hash);
-        let nonce = suggestNonceStrategic(engine, true);
+        // ── 4. Inicjalizacja pętli nonce ─────────────────────────────────────
+        engine.setSeed(seed_hash);
+        let hashBlobBuf = Buffer.from(hashBlob, 'hex');
+        let templateBlobBuf = Buffer.from(templateBlob, 'hex');
+        let extraNonce = 0;
         let count = 0;
         let roundStart = Date.now();
         let lastReport = Date.now();
+        let lastCheck = Date.now(); // #6 FIX: osobny timer dla CHECK_EVERY
         let found = false;
-        let templateAge = Date.now();
+        let newBlock = false;
 
-        while (nonce <= MAX_NONCE) {
-            // Sprawdź czy czas odświeżyć template (nowy blok w sieci!)
-            if (!opts.testMode && Date.now() - templateAge > REFRESH_EVERY) {
-                console.log(c(C.yellow, '\n  ⟳ Odświeżam template (nowy blok w sieci)...'));
-                break; // wróć do pętli zewnętrznej
+        // ── 5. Pętla extra_nonce ──────────────────────────────────────────────
+        // Przy każdym wyczerpaniu nonce 32-bit: inkrementuj extra_nonce,
+        // przelicz merkle lokalnie (bez round-trip do węzła) i szukaj dalej.
+        while (!found && !newBlock) {
+
+            if (extraNonce > 0) {
+                // #4 FIX: poprawna obsługa extra_nonce przez merkle-util
+                templateBlobBuf = applyExtraNonce(templateBlobBuf, template.reserved_offset, extraNonce);
+                hashBlobBuf = rebuildHashBlob(templateBlobBuf, hashBlobBuf);
+                _workBuf = null; // reset bufora roboczego — nowy hashBlob
+                console.log(c(C.yellow,
+                    `\n  ⚠️  Wyczerpano nonce 32-bit → extra_nonce=${extraNonce} → nowy hashBlob`
+                ));
             }
 
-            if (!opts.testMode && Date.now() - templateAge > CHECK_EVERY) {
-                let tmptemplate = await getBlockTemplate(node, address);
-                if (tmptemplate.height > template.height) {
-                    template = tmptemplate;
-                    templateAge = Date.now();
-                    console.log(c(C.yellow, '\n  ⟳ Sprawdzam nowy template... OK'));
-                }
-            }
+            // Sugestia silnika: startujemy z górnego zakresu (mirror algo)
+            const startNonce = suggestNonceStrategic(engine, true);
+            let nonce = startNonce;
+            // #5 FIX: dwie fazy — góra (startNonce→MAX) i dół (0→startNonce)
+            let phase = 'góra';
 
-            // Wstaw nonce do bloba i hash
-            const blobBuf = insertNonce(hashBlob, nonce);
-            const hash = calcHash(blobBuf);
-            count++;
+            // ── 6. Pętla nonce 32-bit ─────────────────────────────────────────
+            while (true) {
 
-            // Sprawdź czy spełnia trudność
-            if (meetsTarget(hash, targetBuf)) {
-                found = true;
-                const elapsed = Date.now() - roundStart;
-                const rate = Math.round(count / (elapsed / 1000));
-
-                console.log(`\n\n${c(C.green + C.bold, '🎉 ZNALEZIONO WAŻNY NONCE!')}`);
-                console.log(c(C.gray, '═'.repeat(60)));
-                console.log(`  ${c(C.cyan, 'Nonce (dec):')}  ${c(C.green + C.bold, fmtNum(nonce))}`);
-                console.log(`  ${c(C.cyan, 'Nonce (hex):')}  ${c(C.green, '0x' + nonce.toString(16).toUpperCase().padStart(8, '0'))}`);
-                const nonceLEBuf = Buffer.allocUnsafe(4); nonceLEBuf.writeUInt32LE(nonce, 0);
-                console.log(`  ${c(C.cyan, 'Nonce (LE):')}   ${nonceLEBuf.toString('hex').toUpperCase()}`);
-                console.log(`  ${c(C.cyan, 'Hash:')}         ${c(C.green, hash.toString('hex'))}`);
-                console.log(`  ${c(C.cyan, 'Blok #:')}       ${fmtNum(height)}`);
-                console.log(`  ${c(C.cyan, 'Prób:')}         ${fmtNum(count)}`);
-                console.log(`  ${c(C.cyan, 'Czas:')}         ${fmtTime(elapsed)}`);
-                console.log(`  ${c(C.cyan, 'Hashrate:')}     ${fmtHashrate(rate)}`);
-                console.log(c(C.gray, '═'.repeat(60)));
-
-                // ── 5. Submit block ──────────────────────────────────────────────
-                if (!opts.testMode) {
-                    const submitBlob = prepareSubmitBlob(templateBlob, nonce);
-                    console.log(`\n  ${c(C.cyan, 'Wysyłam blok do sieci...')}`);
+                // #6 FIX: sprawdzaj nowy blok tylko co CHECK_EVERY ms
+                if (!opts.testMode && Date.now() - lastCheck > CHECK_EVERY) {
+                    lastCheck = Date.now();
                     try {
-                        const result = await submitBlock(node, submitBlob);
-                        if (result && result.status === 'OK') {
-                            totalBlocks++;
-                            console.log(c(C.green + C.bold, `\n  ✅ BLOK ZAAKCEPTOWANY! Nagroda: 0.6 XMR`));
-                            console.log(`  ${c(C.cyan, 'Łącznie znalezionych bloków:')} ${totalBlocks}`);
-                            engine.reward(nonce);
-                            engine.printStatus();
-                        } else {
-                            console.log(c(C.red, `\n  ❌ Blok odrzucony: ${JSON.stringify(result)}`));
+                        const fresh = await getBlockTemplate(node, address);
+                        if (fresh.height > height) {
+                            console.log(c(C.yellow, `\n  ⟳ Nowy blok #${fresh.height} → reset`));
+                            newBlock = true;
+                            break;
                         }
-                    } catch (e) {
-                        console.log(c(C.red, `\n  ❌ Błąd submit: ${e.message}`));
+                    } catch (_) { /* węzeł niedostępny chwilowo – kontynuuj */ }
+                }
+
+                // Hash
+                const blobBuf = insertNonce(hashBlobBuf, nonce);
+                const hash = calcHash(blobBuf);
+                count++;
+
+                if (meetsTarget(hash, targetBuf)) {
+                    found = true;
+                    const elapsed = Date.now() - roundStart;
+                    const rate = Math.round(count / (elapsed / 1000));
+
+                    console.log(`\n\n${c(C.green + C.bold, '🎉 ZNALEZIONO WAŻNY NONCE!')}`);
+                    console.log(c(C.gray, '═'.repeat(60)));
+                    console.log(`  ${c(C.cyan, 'Nonce (dec):')}   ${c(C.green + C.bold, fmtNum(nonce))}`);
+                    console.log(`  ${c(C.cyan, 'Nonce (hex):')}   ${c(C.green, '0x' + nonce.toString(16).toUpperCase().padStart(8, '0'))}`);
+                    const nonceLEBuf = Buffer.allocUnsafe(4); nonceLEBuf.writeUInt32LE(nonce, 0);
+                    console.log(`  ${c(C.cyan, 'Nonce (LE):')}    ${nonceLEBuf.toString('hex').toUpperCase()}`);
+                    console.log(`  ${c(C.cyan, 'Extra nonce:')}   ${extraNonce}`);
+                    console.log(`  ${c(C.cyan, 'Hash:')}          ${c(C.green, hash.toString('hex'))}`);
+                    console.log(`  ${c(C.cyan, 'Blok #:')}        ${fmtNum(height)}`);
+                    console.log(`  ${c(C.cyan, 'Prób:')}          ${fmtNum(count)}`);
+                    console.log(`  ${c(C.cyan, 'Czas:')}          ${fmtTime(elapsed)}`);
+                    console.log(`  ${c(C.cyan, 'Hashrate:')}      ${fmtHashrate(rate)}`);
+                    console.log(c(C.gray, '═'.repeat(60)));
+
+                    // ── Submit block ─────────────────────────────────────────────
+                    if (!opts.testMode) {
+                        // #8 FIX: submit używa templateBlobBuf (z aktualnym extra_nonce)
+                        const submitBuf = Buffer.from(templateBlobBuf);
+                        submitBuf.writeUInt32LE(nonce, 39);
+                        const submitHex = submitBuf.toString('hex');
+                        console.log(`\n  ${c(C.cyan, 'Wysyłam blok do sieci...')}`);
+                        try {
+                            const result = await submitBlock(node, submitHex);
+                            if (result && result.status === 'OK') {
+                                totalBlocks++;
+                                console.log(c(C.green + C.bold, `\n  ✅ BLOK ZAAKCEPTOWANY! Nagroda: 0.6 XMR`));
+                                console.log(`  ${c(C.cyan, 'Łącznie znalezionych bloków:')} ${totalBlocks}`);
+                                engine.reward(nonce);
+                                engine.printStatus();
+                            } else {
+                                console.log(c(C.red, `\n  ❌ Blok odrzucony: ${JSON.stringify(result)}`));
+                            }
+                        } catch (e) {
+                            console.log(c(C.red, `\n  ❌ Błąd submit: ${e.message}`));
+                        }
+                    } else {
+                        const submitBuf = Buffer.from(templateBlobBuf);
+                        submitBuf.writeUInt32LE(nonce, 39);
+                        console.log(c(C.green, '\n  [TEST] Blok zostałby wysłany do sieci!'));
+                        console.log(`  ${c(C.cyan, 'submit blob:')} ${submitBuf.toString('hex').slice(0, 32)}...`);
+                        process.exit(0);
+                    }
+                    break;
+                }
+
+                // Raport postępu
+                if (count % REPORT_EVERY === 0) {
+                    const now = Date.now();
+                    const elapsed = (now - lastReport) / 1000 || 0.001;
+                    const rate = Math.round(REPORT_EVERY / elapsed);
+                    const total = now - roundStart;
+                    const bar = drawBar(nonce, MAX_NONCE, 20);
+                    process.stdout.write(
+                        `\r  ${bar} ` +
+                        `block:${c(C.cyan, '#' + fmtNum(height))} ` +
+                        `extra:${c(C.cyan, String(extraNonce))} ` +
+                        `nonce:${c(C.white, fmtNum(nonce))} ` +
+                        `rate:${c(C.orange, fmtHashrate(rate))} ` +
+                        `time:${c(C.gray, fmtTime(total))}   `
+                    );
+                    lastReport = now;
+                }
+
+                // #5 FIX: dwie fazy iteracji
+                if (phase === 'góra') {
+                    nonce++;
+                    if (nonce > MAX_NONCE) {
+                        phase = 'dół';
+                        nonce = 0;
                     }
                 } else {
-                    console.log(c(C.green, '\n  [TEST] Blok zostałby wysłany do sieci!'));
-                    console.log(`  ${c(C.cyan, 'submit blob:')} ${prepareSubmitBlob(templateBlob, nonce).slice(0, 32)}...`);
-                    // W trybie testowym kończymy po znalezieniu
-                    process.exit(0);
+                    nonce++;
+                    if (nonce >= startNonce) {
+                        // Wyczerpano pełny zakres 32-bit → extra_nonce++
+                        extraNonce++;
+                        break;
+                    }
                 }
+            } // koniec pętli nonce
+        } // koniec pętli extra_nonce
 
-                break; // wróć do pętli zewnętrznej po znalezieniu
-            }
-
-            // ── Raport postępu ────────────────────────────────────────────────
-            if (count % REPORT_EVERY === 0) {
-                const now = Date.now();
-                const elapsed = (now - lastReport) / 1000;
-                const rate = Math.round(REPORT_EVERY / elapsed);
-                const total = now - roundStart;
-                const pctNonce = ((nonce / MAX_NONCE) * 100).toFixed(3);
-
-                const bar = drawBar(nonce, MAX_NONCE, 20);
-                process.stdout.write(
-                    `\r  ${bar} ` +
-                    `block: ${c(C.cyan, '#' + fmtNum(height))} ` +
-                    `nonce: ${c(C.white, fmtNum(nonce))} ` +
-                    `rate: ${c(C.orange, fmtHashrate(rate))} ` +
-                    `time: ${c(C.gray, fmtTime(total))}    `
-                );
-
-                lastReport = now;
-            }
-        }
-
-        if (!found && nonce > MAX_NONCE) {
-            // Wyczerpaliśmy cały zakres 32-bit bez wyniku
-            // To może się zdarzyć przy bardzo wysokiej trudności
-            // → odświeżamy template (z nowym extra_nonce w coinbase automatycznie)
-            console.log(c(C.yellow, '\n  ⚠️  Wyczerpano nonce 32-bit → pobieranie nowego template'));
-            updateExtraNonce(templateBlob);
-            engine.setSeed(template.seed_hash);
-            nonce = suggestNonceStrategic(engine, true);
-        }
-
-        const saved = engine.exportState();
-        fs.writeFileSync('nonce-model.json', JSON.stringify(saved));
+        // #3 FIX: zapisz stan silnika osobno, nie nadpisuj modelu
+        fs.writeFileSync(ENGINE_FILE, JSON.stringify(engine.exportState(), null, 2));
     }
 }
 
