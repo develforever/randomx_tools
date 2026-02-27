@@ -233,7 +233,7 @@ function makeTestTemplate() {
 // ─── GŁÓWNA PĘTLA MININGU ─────────────────────────────────────────────────────
 async function mineLoop(node, address, opts) {
     const MAX_NONCE = 0xFFFFFFFF;
-    const REPORT_EVERY = 10_000;  // raportuj co 10k hashy
+    const REPORT_EVERY = 10000;  // raportuj co 10k hashy
     const CHECK_EVERY = 5000;    // sprawdzaj nowy blok co 5s
     let totalBlocks = 0;
     let sessionStart = Date.now();
